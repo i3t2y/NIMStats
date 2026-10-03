@@ -23,9 +23,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_FILE = SCRIPT_DIR / "results.json"
 
 ALL_MODELS = [
-    "deepseek-ai/deepseek-v4-flash-0731",
-    "minimaxai/minimax-m3",
-    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     "moonshotai/kimi-k2.6",
     "google/gemma-4-31b-it",
@@ -34,7 +31,6 @@ ALL_MODELS = [
     "nvidia/nemotron-3.5-lightning-30b-a3b",
     "openai/gpt-oss-20b",
     "moonshotai/kimi-k3",
-    "deepseek-ai/deepseek-v4-pro-0813",
 ]
 
 GROUP1_MODELS = ALL_MODELS[: len(ALL_MODELS) // 2 + len(ALL_MODELS) % 2]
