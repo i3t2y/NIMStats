@@ -17,6 +17,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HISTORY_DB = REPO_ROOT / "history.db"
 TOP_DIR = REPO_ROOT / "top"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    # Embedding models are availability probes, not chat benchmarks; they must
+    # never be named a "best model" endpoint winner.
+    from test_models import EMBEDDING_MODELS
+except Exception:
+    EMBEDDING_MODELS = []
+
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
     """Add new columns to existing databases if missing."""
@@ -190,10 +198,10 @@ def main():
                 if m_res.get("success"):
                     last_run_successes.add(m_res.get("model"))
                     
-        eligible_models = [m for m in stats if m in last_run_successes]
+        eligible_models = [m for m in stats if m in last_run_successes and m not in EMBEDDING_MODELS]
         if not eligible_models:
             print("Warning: No models succeeded in the last run. Falling back to all models.")
-            eligible_models = list(stats.keys())
+            eligible_models = [m for m in stats if m not in EMBEDDING_MODELS]
         
         # 1. Balanced
         best_balanced = max(eligible_models, key=lambda m: stats[m]["score_balanced"])

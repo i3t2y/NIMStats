@@ -36,6 +36,9 @@ def main() -> int:
     fastest_time = 0
 
     successful = [m for m in all_models if m.get("success")]
+    # Fastest-model honors go to chat models only; embedding probes are
+    # availability checks and would win on raw latency almost every time.
+    successful = [m for m in successful if m.get("kind") != "embedding"]
     if successful:
         fastest = min(successful, key=lambda x: x.get("responseTime") or float("inf"))
         fastest_model = fastest.get("model", "N/A")

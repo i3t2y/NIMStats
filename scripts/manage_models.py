@@ -20,25 +20,56 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TEST_MODELS_FILE = SCRIPT_DIR / "test_models.py"
 
 
-def _find_all_models_node(source: str):
+def _find_list_node(source: str, name: str):
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "ALL_MODELS":
+                if isinstance(target, ast.Name) and target.id == name:
                     if isinstance(node.value, ast.List):
                         return node, node.value
-    raise RuntimeError("Could not find ALL_MODELS in test_models.py")
+    raise RuntimeError(f"Could not find {name} in test_models.py")
 
 
-def _read_all_models() -> list[str]:
-    source = TEST_MODELS_FILE.read_text(encoding="utf-8")
-    _, list_node = _find_all_models_node(source)
+def _find_all_models_node(source: str):
+    return _find_list_node(source, "ALL_MODELS")
+
+
+def _list_values(list_node) -> list[str]:
     return [
         elt.value
         for elt in list_node.elts
         if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
     ]
+
+
+def _read_all_models() -> list[str]:
+    source = TEST_MODELS_FILE.read_text(encoding="utf-8")
+    _, list_node = _find_all_models_node(source)
+    return _list_values(list_node)
+
+
+def _read_embedding_models() -> list[str]:
+    source = TEST_MODELS_FILE.read_text(encoding="utf-8")
+    try:
+        _, list_node = _find_list_node(source, "EMBEDDING_MODELS")
+    except RuntimeError:
+        return []
+    return _list_values(list_node)
+
+
+def _read_configured_models() -> list[str]:
+    """Every model the pipeline is expected to have data for.
+
+    ALL_MODELS (chat benchmarks) plus EMBEDDING_MODELS (availability probes).
+    Purge / orphan checks must use this union, otherwise the hourly purge
+    would delete the embedding probe data it just wrote.
+    """
+    configured = _read_all_models()
+    for model in _read_embedding_models():
+        if model not in configured:
+            configured.append(model)
+    return configured
 
 
 def _write_all_models(models: list[str]) -> None:
@@ -61,11 +92,17 @@ def _db_connect() -> sqlite3.Connection:
 
 
 def cmd_list() -> int:
-    configured = _read_all_models()
+    chat_models = _read_all_models()
+    configured = _read_configured_models()
     print("=== Models in test_models.py ===")
-    for i, m in enumerate(configured, 1):
+    for i, m in enumerate(chat_models, 1):
         print(f"  {i:2}. {m}")
-    print(f"  Total: {len(configured)}")
+    print(f"  Total: {len(chat_models)}")
+    embedding_models = [m for m in configured if m not in chat_models]
+    if embedding_models:
+        print("=== Embedding probes in test_models.py ===")
+        for m in embedding_models:
+            print(f"  - {m}")
 
     conn = _db_connect()
     db_models = [r[0] for r in conn.execute("SELECT name FROM models ORDER BY name").fetchall()]
@@ -145,7 +182,7 @@ def cmd_remove(model_id: str) -> int:
 
 
 def cmd_purge() -> int:
-    configured = set(_read_all_models())
+    configured = set(_read_configured_models())
     conn = _db_connect()
     db_models = [r[0] for r in conn.execute("SELECT name FROM models ORDER BY name").fetchall()]
     orphans = [m for m in db_models if m not in configured]

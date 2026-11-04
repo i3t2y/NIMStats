@@ -40,6 +40,18 @@ ALL_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b",
 ]
 
+# Non-chat availability probes. These models are NOT chat benchmarks: they are
+# probed via their native endpoint (see call_embedding) purely so their uptime
+# shows up in history.db / the dashboard next to the chat models. They are
+# excluded from fastest-model and best-model rankings. Managed separately from
+# ALL_MODELS on purpose: the daily model-list sync only governs ALL_MODELS and
+# must not remove these.
+EMBEDDING_MODELS = [
+    "nvidia/nemotron-3.5-embed-8b",
+]
+
+EMBEDDING_PROBE_INPUT = "NIMStats embedding availability probe"
+
 GLM_THINKING_MODELS = {"z-ai/glm-5.3-flash", "z-ai/glm-5.3"}
 
 GROUP1_MODELS = ALL_MODELS[: len(ALL_MODELS) // 2 + len(ALL_MODELS) % 2]
@@ -211,14 +223,105 @@ def call_model(model: str, prompt: str) -> dict[str, Any]:
     }
 
 
+def call_embedding(model: str) -> dict[str, Any]:
+    """Availability probe for an embedding model via POST /embeddings.
+
+    Success means HTTP 200 with a non-empty embedding vector. The result uses
+    the same shape as chat results (plus kind="embedding") so it flows through
+    merge_results / db_utils unchanged; tokensGenerated is 0 because embedding
+    models generate no tokens.
+    """
+    payload = {
+        "model": model,
+        "input": EMBEDDING_PROBE_INPUT,
+        "input_type": "query",
+        "truncate": "END",
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    request = urllib.request.Request(
+        f"{API_BASE}/embeddings",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    def fail(error: str) -> dict[str, Any]:
+        result = failure_result(model, error)
+        result["kind"] = "embedding"
+        return result
+
+    started = time.perf_counter()
+    status_code = 0
+    raw = ""
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            status_code = response.status
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code = getattr(exc, "code", 0) or 0
+        raw = exc.read().decode("utf-8", errors="replace")
+    except TimeoutError:
+        return fail(f"Request timed out after {REQUEST_TIMEOUT_SECONDS}s")
+    except Exception as exc:
+        return fail(f"Request failed: {exc}")
+
+    response_time = int((time.perf_counter() - started) * 1000)
+
+    if status_code >= 400:
+        error_message = f"HTTP {status_code}"
+        try:
+            err_data = json.loads(raw)
+            err_obj = err_data.get("error")
+            if isinstance(err_obj, dict):
+                error_message = f"HTTP {status_code}: {err_obj.get('message', '')}"
+            elif isinstance(err_obj, str):
+                error_message = f"HTTP {status_code}: {err_obj}"
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return fail(error_message)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return fail("Invalid JSON in embedding response")
+
+    items = data.get("data") if isinstance(data, dict) else None
+    vector = None
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        vector = items[0].get("embedding")
+    if not isinstance(vector, list) or not vector:
+        return fail("No embedding vector in response")
+
+    usage = data.get("usage") if isinstance(data, dict) and isinstance(data.get("usage"), dict) else {}
+
+    return {
+        "model": model,
+        "success": True,
+        "responseTime": response_time,
+        "tokensGenerated": 0,
+        "totalTokens": to_int(usage.get("total_tokens")),
+        "timeToFirstToken": None,
+        "response": None,
+        "error": None,
+        "kind": "embedding",
+    }
+
+
 def compile_output(timestamp: str, prompt: str, models: list[dict[str, Any]]) -> dict[str, Any]:
     successful = [item for item in models if item.get("success")]
     success_count = len(successful)
     total_count = len(models)
 
-    if successful:
+    # Fastest-model honors go to chat models only; embedding probes are
+    # availability checks and would win on raw latency almost every time.
+    fastest_pool = [item for item in successful if item.get("kind") != "embedding"]
+    if fastest_pool:
         fastest = min(
-            successful,
+            fastest_pool,
             key=lambda item: item.get("responseTime")
             if isinstance(item.get("responseTime"), int)
             else float("inf"),
@@ -272,6 +375,20 @@ def main() -> int:
             print(f"  ✗ Failed: {result.get('error') or 'Unknown error'}")
         results.append(result)
         time.sleep(0.5)
+
+    # Embedding availability probes ride along with group2 (the smaller group)
+    # and with full "all" runs; group1 never probes them, so each merged run
+    # contains exactly one probe result per embedding model.
+    if MODEL_GROUP in ("group2", "all"):
+        for model in EMBEDDING_MODELS:
+            print(f"Testing (embedding probe): {model}")
+            result = call_embedding(model)
+            if result.get("success"):
+                print(f"  ✓ Success ({result['responseTime']}ms)")
+            else:
+                print(f"  ✗ Failed: {result.get('error') or 'Unknown error'}")
+            results.append(result)
+            time.sleep(0.5)
 
     print()
     print("Compiling results...")
